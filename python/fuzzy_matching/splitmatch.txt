@@ -1,0 +1,208 @@
+import pandas as pd
+
+# --------------------------
+# Load withdrawals and deposits
+# --------------------------
+withdrawals = pd.read_csv("unmatched_withdrawals.csv", parse_dates=["Transaction_date"])
+deposits = pd.read_csv("unmatched_deposits.csv", parse_dates=["Transaction_date"])
+
+# Sort for consistency
+withdrawals = withdrawals.sort_values(["Source", "Transaction_date", "Amount"]).reset_index(drop=True)
+deposits = deposits.sort_values(["Source", "Transaction_date", "Amount"]).reset_index(drop=True)
+
+# --------------------------
+# Parameters
+# --------------------------
+tolerance = 5000  # Max allowed difference
+
+def get_match_type(difference):
+    if difference == 0:
+        return "Split Exact"
+    elif 0 < difference <= tolerance:
+        return "Split Approximate"
+    else:
+        return ""
+
+matched_records = []
+used_withdrawals = set()
+used_deposits = set()
+
+# ==========================================================
+# STEP 1 — Single Withdrawal ↔ Single Deposit
+# ==========================================================
+for w_idx, w_row in withdrawals.iterrows():
+    if w_idx in used_withdrawals:
+        continue
+    candidate_deposits = deposits[
+        (deposits["Source"] != w_row["Source"]) &
+        (~deposits.index.isin(used_deposits)) &
+        (deposits["Transaction_date"] == w_row["Transaction_date"]) &
+        (deposits["Amount"] <= w_row["Amount"])
+    ]
+    if candidate_deposits.empty:
+        continue
+    d_row = candidate_deposits.iloc[0]
+    difference = w_row["Amount"] - d_row["Amount"]
+    if 0 <= difference <= tolerance:
+        matched_records.append({
+            "Withdrawal_Source": w_row["Source"],
+            "Deposit_Source": d_row["Source"],
+
+            "Withdrawal_Transaction_date": w_row["Transaction_date"],
+            "Deposit_Transaction_date": d_row["Transaction_date"],
+
+            "Withdrawal_Reference": w_row.get("Reference",""),
+            "Deposit_Reference": d_row.get("Reference",""),
+
+            "Withdrawal_Description": w_row.get("Description",""),
+            "Deposit_Description": d_row.get("Description",""),
+
+            "Withdrawal_Transaction_Type": w_row.get("Transaction_Type",""),
+            "Deposit_Transaction_Type": d_row.get("Transaction_Type",""),
+
+            "Split_Withdrawal_Amount": str(w_row["Amount"]),
+            "Split_Deposit_Amount": str(d_row["Amount"]),
+
+            "Total_Split_Withdrawals": w_row["Amount"],
+            "Total_Split_Deposits": d_row["Amount"],
+
+            "Difference": difference,
+            "Match_Type": get_match_type(difference)
+        })
+        used_withdrawals.add(w_idx)
+        used_deposits.add(d_row.name)
+
+# ==========================================================
+# STEP 2 — Single Withdrawal ↔ Multiple Deposits (greedy)
+# ==========================================================
+for w_idx, w_row in withdrawals.iterrows():
+    if w_idx in used_withdrawals:
+        continue
+    candidate_deposits = deposits[
+        (deposits["Source"] != w_row["Source"]) &
+        (~deposits.index.isin(used_deposits)) &
+        (deposits["Transaction_date"] == w_row["Transaction_date"]) &
+        (deposits["Amount"] <= w_row["Amount"])
+    ].sort_values("Amount", ascending=False)
+
+    split_amounts, split_refs, split_descs, split_sources, split_dates, split_types = [], [], [], [], [], []
+    total = 0
+    for idx, d_row in candidate_deposits.iterrows():
+        if total + d_row["Amount"] > w_row["Amount"]:
+            continue
+        total += d_row["Amount"]
+        split_amounts.append(d_row["Amount"])
+        split_refs.append(d_row.get("Reference",""))
+        split_descs.append(d_row.get("Description",""))
+        split_sources.append(d_row["Source"])
+        split_dates.append(d_row["Transaction_date"])
+        split_types.append(d_row.get("Transaction_Type",""))
+        used_deposits.add(idx)
+        if w_row["Amount"] - total <= tolerance:
+            break
+    if split_amounts:
+        difference = w_row["Amount"] - total
+        if 0 <= difference <= tolerance:
+            matched_records.append({
+                "Withdrawal_Source": w_row["Source"],
+                "Deposit_Source": ",".join(map(str, split_sources)),
+
+                "Withdrawal_Transaction_date": w_row["Transaction_date"],
+                "Deposit_Transaction_date": ",".join(map(str, split_dates)),
+
+                "Withdrawal_Reference": w_row.get("Reference",""),
+                "Deposit_Reference": ",".join(map(str, split_refs)),
+
+                "Withdrawal_Description": w_row.get("Description",""),
+                "Deposit_Description": ",".join(map(str, split_descs)),
+
+                "Withdrawal_Transaction_Type": w_row.get("Transaction_Type",""),
+                "Deposit_Transaction_Type": ",".join(map(str, split_types)),
+
+                "Split_Withdrawal_Amount": str(w_row["Amount"]),
+                "Split_Deposit_Amount": ",".join(map(str, split_amounts)),
+
+                "Total_Split_Withdrawals": w_row["Amount"],
+                "Total_Split_Deposits": total,
+
+                "Difference": difference,
+                "Match_Type": get_match_type(difference)
+            })
+            used_withdrawals.add(w_idx)
+
+# ==========================================================
+# STEP 3 — Single Deposit ↔ Multiple Withdrawals (greedy)
+# ==========================================================
+for d_idx, d_row in deposits.iterrows():
+    if d_idx in used_deposits:
+        continue
+    candidate_withdrawals = withdrawals[
+        (withdrawals["Source"] != d_row["Source"]) &
+        (~withdrawals.index.isin(used_withdrawals)) &
+        (withdrawals["Transaction_date"] == d_row["Transaction_date"]) &
+        (withdrawals["Amount"] <= d_row["Amount"])
+    ].sort_values("Amount", ascending=False)
+
+    split_amounts, split_refs, split_descs, split_sources, split_dates, split_types = [], [], [], [], [], []
+    total = 0
+    for idx, w_row in candidate_withdrawals.iterrows():
+        if total + w_row["Amount"] > d_row["Amount"]:
+            continue
+        total += w_row["Amount"]
+        split_amounts.append(w_row["Amount"])
+        split_refs.append(w_row.get("Reference",""))
+        split_descs.append(w_row.get("Description",""))
+        split_sources.append(w_row["Source"])
+        split_dates.append(w_row["Transaction_date"])
+        split_types.append(w_row.get("Transaction_Type",""))
+        used_withdrawals.add(idx)
+        if d_row["Amount"] - total <= tolerance:
+            break
+    if split_amounts:
+        difference = d_row["Amount"] - total
+        if 0 <= difference <= tolerance:
+            matched_records.append({
+                "Withdrawal_Source": ",".join(map(str, split_sources)),
+                "Deposit_Source": d_row["Source"],
+
+                "Withdrawal_Transaction_date": ",".join(map(str, split_dates)),
+                "Deposit_Transaction_date": d_row["Transaction_date"],
+
+                "Withdrawal_Reference": ",".join(map(str, split_refs)),
+                "Deposit_Reference": d_row.get("Reference",""),
+
+                "Withdrawal_Description": ",".join(map(str, split_descs)),
+                "Deposit_Description": d_row.get("Description",""),
+
+                "Withdrawal_Transaction_Type": ",".join(map(str, split_types)),
+                "Deposit_Transaction_Type": d_row.get("Transaction_Type",""),
+
+                "Split_Withdrawal_Amount": ",".join(map(str, split_amounts)),
+                "Split_Deposit_Amount": str(d_row["Amount"]),
+
+                "Total_Split_Withdrawals": total,
+                "Total_Split_Deposits": d_row["Amount"],
+
+                "Difference": difference,
+                "Match_Type": get_match_type(difference)
+            })
+            used_deposits.add(d_idx)
+
+# ==========================================================
+# STEP 4 — Save matched transactions
+# ==========================================================
+matched_df = pd.DataFrame(matched_records)
+matched_df.to_csv("matched_transactions.csv", index=False)
+print("✅ matched_transactions.csv saved")
+
+# ==========================================================
+# STEP 5 — Save unreconciled withdrawals and deposits separately
+# ==========================================================
+unreconciled_withdrawals = withdrawals[~withdrawals.index.isin(used_withdrawals)]
+unreconciled_deposits = deposits[~deposits.index.isin(used_deposits)]
+
+unreconciled_withdrawals.to_csv("unreconciled_withdrawals.csv", index=False)
+unreconciled_deposits.to_csv("unreconciled_deposits.csv", index=False)
+
+print("✅ unreconciled_withdrawals.csv saved")
+print("✅ unreconciled_deposits.csv saved")
